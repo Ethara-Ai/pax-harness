@@ -282,6 +282,29 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
+
+    # === Cloud platforms ====================================================
+
+    # AWS Bedrock: model strings already include "bedrock/" prefix.
+    # Auth via bearer token (AWS_BEARER_TOKEN_BEDROCK) bypasses SigV4.
+    ProviderSpec(
+        name="bedrock",
+        keywords=("bedrock",),
+        env_key="AWS_BEARER_TOKEN_BEDROCK",
+        display_name="AWS Bedrock",
+        litellm_prefix="",                  # model string already "bedrock/converse/..."
+        skip_prefixes=("bedrock/",),        # never double-prefix
+        env_extras=(
+            ("AWS_REGION_NAME", "us-east-1"),
+        ),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
 )
 
 

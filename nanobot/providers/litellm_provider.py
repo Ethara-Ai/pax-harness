@@ -183,7 +183,41 @@ class LiteLLMProvider(LLMProvider):
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
+        # Capture litellm's auto-calculated cost (requires litellm.register_model)
+        hidden = getattr(response, "_hidden_params", {}) or {}
+        if hidden.get("response_cost") is not None:
+            usage["response_cost"] = hidden["response_cost"]
         
+        # Capture response headers and metadata for debugging/auditing
+        headers = {}
+        # litellm's own response timing (total latency including network)
+        response_ms = getattr(response, "_response_ms", None)
+        if response_ms is not None:
+            headers["response_ms"] = response_ms
+        # litellm overhead time (time spent in litellm, not in API)
+        if hidden.get("litellm_overhead_time_ms"):
+            headers["litellm_overhead_ms"] = hidden["litellm_overhead_time_ms"]
+        # Raw provider response headers (x-amzn-requestid, token counts, etc.)
+        raw_headers = getattr(response, "_response_headers", None) or {}
+        if raw_headers:
+            # Extract key AWS headers
+            for key in ("x-amzn-requestid", "x-amzn-bedrock-input-token-count",
+                        "x-amzn-bedrock-output-token-count"):
+                if key in raw_headers:
+                    headers[key] = str(raw_headers[key])
+        # litellm's additional_headers (provider headers prefixed with llm_provider-)
+        additional_headers = hidden.get("additional_headers", {}) or {}
+        if additional_headers:
+            # Only include non-redundant headers
+            for k, v in additional_headers.items():
+                if k.startswith("llm_provider-"):
+                    headers[k] = str(v)
+        # litellm call ID (unique per request)
+        if hidden.get("litellm_call_id"):
+            headers["litellm_call_id"] = str(hidden["litellm_call_id"])
+        # Response ID from the model API
+        if hasattr(response, "id") and response.id:
+            headers["response_id"] = str(response.id)
         reasoning_content = getattr(message, "reasoning_content", None)
         
         return LLMResponse(
@@ -191,6 +225,7 @@ class LiteLLMProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
+            headers=headers,
             reasoning_content=reasoning_content,
         )
     

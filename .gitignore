@@ -1,0 +1,8 @@
+# Virtual Enviorments and cache
+
+.venv
+__pycache__
+.DS_store
+
+# Enviorment variable
+.env

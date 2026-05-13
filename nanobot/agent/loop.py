@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -187,16 +188,43 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
+        self._last_trace = None  # Will store full messages trace after processing
+        self._total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0, "cost_usd": 0.0}
+        self._call_metrics = []  # Per-call breakdown: usage, latency, headers per LLM call
         
         while iteration < self.max_iterations:
             iteration += 1
             
-            # Call LLM
+            # Call LLM with wall-clock timing
+            t0 = time.time()
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
+            llm_latency_ms = round((time.time() - t0) * 1000, 1)
+            
+            # Use litellm's response_ms if available (more accurate), else wall-clock
+            litellm_ms = response.headers.get("response_ms") if response.headers else None
+            effective_latency_ms = round(litellm_ms, 1) if litellm_ms else llm_latency_ms
+            
+            # Build per-call metrics
+            call_metric = {
+                "iteration": iteration,
+                "latency_ms": effective_latency_ms,
+                "wall_clock_ms": llm_latency_ms,
+                "usage": response.usage.copy() if response.usage else {},
+                "headers": response.headers.copy() if response.headers else {},
+            }
+            self._call_metrics.append(call_metric)
+            
+            # Accumulate token usage and cost
+            if response.usage:
+                self._total_usage["prompt_tokens"] += response.usage.get("prompt_tokens", 0)
+                self._total_usage["completion_tokens"] += response.usage.get("completion_tokens", 0)
+                self._total_usage["total_tokens"] += response.usage.get("total_tokens", 0)
+                self._total_usage["cost_usd"] += response.usage.get("response_cost", 0) or 0
+                self._total_usage["llm_calls"] += 1
             
             # Handle tool calls
             if response.has_tool_calls:
@@ -216,22 +244,44 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
+                # Attach per-call usage/latency to the assistant message in trace
+                messages[-1]["_metrics"] = {
+                    "usage": response.usage.copy() if response.usage else {},
+                    "latency_ms": effective_latency_ms,
+                    "iteration": iteration,
+                }
                 
-                # Execute tools
+                # Execute tools with timing
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    t1 = time.time()
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    tool_latency_ms = round((time.time() - t1) * 1000, 1)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    # Attach execution timing to tool result message
+                    messages[-1]["_metrics"] = {"execution_ms": tool_latency_ms}
             else:
                 # No tool calls, we're done
                 final_content = response.content
+                messages = self.context.add_assistant_message(
+                    messages, response.content, None,
+                    reasoning_content=response.reasoning_content,
+                )
+                # Attach per-call usage/latency to final assistant message
+                messages[-1]["_metrics"] = {
+                    "usage": response.usage.copy() if response.usage else {},
+                    "latency_ms": effective_latency_ms,
+                    "iteration": iteration,
+                }
                 break
         
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+        
+        self._last_trace = messages
         
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
