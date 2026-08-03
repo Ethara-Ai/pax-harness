@@ -597,6 +597,9 @@ GLM-5 (the stronger model) is MORE vulnerable than Nova-2-Lite across all attack
 
 ## 11. CLI and Configuration
 
+> **Command-only reference:** every command in this repo (setup, benchmarks, subscription bridges, verifiers, chart regeneration, delivery workflow) is documented as a single-purpose companion in [`howtorun.md`](howtorun.md). This README describes the environment and its design; `howtorun.md` answers "how do I do X".
+
+
 ### Hard Benchmark (IPI + Memory)
 
 ```bash
@@ -1054,7 +1057,103 @@ The format for model ARNs follows LiteLLM's provider routing convention: `bedroc
 | Deployment | Zero code changes to nanobot | .env swap only |
 
 
-## 20. Citation
+## 20. Subscription Bridges (Optional Inference Layer)
+
+Two optional local FastAPI proxies vendored under `nanobot/bridges/` route rollout inference through Anthropic and OpenAI **OAuth subscriptions** instead of metered API keys — useful for evaluation runs at scale where per-token API pricing would dominate training-time inference cost.
+
+### 20.1 Claude Code bridge — `nanobot/bridges/claude_code/`
+
+Reads OAuth credentials from macOS Keychain (populated when the operator runs `claude login`) and forwards to `api.anthropic.com` with the required `anthropic-beta: oauth-2025-04-20` header and `You are Claude Code` system-prefix injection. Listens on `127.0.0.1:8765`. Speaks the Anthropic Messages API natively.
+
+Start: `python -m nanobot.bridges.claude_code --port 8765`
+
+Then any `--model cc*` flag on either benchmark runner routes through it. The provider spec at `nanobot/providers/registry.py::PROVIDERS[claude_code]` auto-sets `ANTHROPIC_API_BASE=http://127.0.0.1:8765` when a Claude-family model is requested.
+
+Supported model aliases: `cc`, `cc-sonnet`, `cc-sonnet-4-5`, `cc-sonnet-4-6`, `cc-sonnet-5`, `cc-opus`, `cc-opus-4-6`, `cc-opus-4-7`, `cc-opus-4-8`, `cc-opus-5`, `cc-haiku`, `cc-haiku-4-5`, `cc-fable`, `cc-fable-5`, `cc-mythos`, `cc-mythos-5`, `cc-mythos-preview`, `claude-code`. Full env reference: [`docs/CLAUDE_CODE_BRIDGE.md`](docs/CLAUDE_CODE_BRIDGE.md).
+
+### 20.2 Codex bridge — `nanobot/bridges/openai_codex/`
+
+Reads OAuth from `~/.codex/auth.json` (populated when the operator runs `codex login`) and forwards to `chatgpt.com/backend-api/codex/responses` with the required ChatGPT-Account-Id, session_id, and User-Agent headers. Listens on `127.0.0.1:8788`. Exposes both `/v1/chat/completions` (translated) and `/v1/responses` (native). `nanobot/bridges/openai_codex/translate.py` bidirectionally converts between Chat Completions and Responses API — a Chat Completions client that requests a tool with the `{type: "function", function: {name, ...}}` shape gets reshaped to Responses' `{type: "function", name, ...}` before forwarding.
+
+Start: `python -m nanobot.bridges.openai_codex --port 8788`
+
+Supported model aliases: `ccx`, `codex`, `ccx-gpt-5`, `ccx-gpt-5-4`, `ccx-gpt-5-5`, `ccx-o3`, `ccx-o4-mini`, `ccx-o4-mini-high`, `ccx-codex`. Full env reference: [`docs/OPENAI_CODEX_BRIDGE.md`](docs/OPENAI_CODEX_BRIDGE.md).
+
+### 20.3 Rate limits and terms
+
+Both routes are subscription-authenticated. Session-cap 429 responses have hour-long `retry-after` windows; bursting `--concurrency 5` on a 30-case run can exhaust a 5-hour cap in ~2 minutes. Appropriate for individual research and evaluation only — not for RL data generation at 10K+ episodes, production traffic, or shared access. That would be a ToS violation and will lock the subscription.
+
+---
+
+## 21. Verifier System (MECE-Enforced Reward Validation)
+
+Location: [`verifiers/`](verifiers/). A two-layer trajectory verifier that validates every generated episode against the reward-scoring contract. Guarantees that scores in `hard_benchmark_output/` and `client_delivery/trajectories/` are correctly computed by the 4-tier cascade — a class of failure that surfaced 5 inflated `llm_judge` scores in the original pilot delivery.
+
+### 21.1 The two layers
+
+**Deterministic (17 concerns)** — pytest predicates in `verifiers/deterministic/predicates.py`, wrapped as five `test_*.py` files for xUnit output. Covers: required-field presence per trajectory type (IPI/TRD vs Memory), score-range validity, `scoring_method` enum, `score_contract.rule_tool`/`rule_text`/`rule_safe_only`/`memory_leak` consistency between recorded score and observed tool_calls, security hygiene (no `/Users/*` paths, no known-real AWS account IDs), correction integrity when `original_score` is present, and cross-references to carriers and credential-index resolution.
+
+**Rubric (4 concerns)** — YAML rubrics at `verifiers/rubrics/*.yaml`, evaluated by an LLM judge. Each criterion declares a `concern:` that maps 1:1 to the concern registry:
+- `presence_vs_execution.yaml` — for `scoring_method=llm_judge`, audits whether the agent actually executed vs was merely influenced (the audit that caught the 5 inflated scores)
+- `refusal_quality.yaml` — for score 0/1, distinguishes principled from performative refusals
+- `case_authenticity.yaml` — verifies the injection actually implements its claimed technique, and that the target domain reads as corporate rather than transparently fake
+
+### 21.2 MECE enforcement loop
+
+`verifiers/concerns.py` is the canonical registry — 21 concerns, each with exactly one owner (`DETERMINISTIC` or `RUBRIC`). `verifiers/tests/test_mece.py` is a pytest suite that fails at PR time if:
+- Any concern id is duplicated in the registry
+- Any predicate emits a `check_id` not present in the registry (orphan)
+- Any rubric criterion declares a `concern:` not in the registry (orphan)
+- Any concern has zero implementations (collective-exhaustiveness violation)
+- **Any concern is implemented by both layers (mutual-exclusivity violation)**
+- Owner declared in the registry doesn't match the layer that implements it
+
+Running: `pytest verifiers/tests/test_mece.py -v` — 30 tests, ~0.03 s. Anyone adding a new check MUST update `concerns.py` first, or CI fails.
+
+### 21.3 Cross-model judge selection
+
+To reduce self-judging bias, the rubric layer auto-selects a judge from the opposite model family:
+- `claude-opus-*` (generator) → `gpt-5.6-sol` (judge, via Codex bridge)
+- `gpt-5.6-sol` (generator) → `claude-opus-5` (judge, via CC bridge)
+- All other generators require an explicit `--judge` (fails loudly if omitted)
+
+### 21.4 CLI
+
+```
+python -m verifiers <trajectory-or-dir>                    # deterministic + rubrics
+python -m verifiers <input> --skip-rubrics                 # fast, no LLM cost
+python -m verifiers <input> --judge cc-opus                # override judge
+python -m verifiers <input> --json --out report.json       # machine-readable
+python -m verifiers <input> --quiet && echo "ok to ship"   # exit 0 = all ACCEPT
+```
+
+Exit code 0 = every trajectory ACCEPTed; exit 1 = any trajectory QUARANTINEd. Full command reference: [`howtorun.md`](howtorun.md) §5.
+
+---
+
+## 22. Client Delivery Artifact
+
+Location: [`client_delivery/`](client_delivery/). Curated 30-case subset of the pilot (10 IPI + 10 Memory + 10 TRD) prepared for external research delivery. Selection prioritizes cross-model disagreements — cases where one baseline model succumbs and the other resists — to expose the capability-vulnerability paradox.
+
+Layout:
+```
+client_delivery/
+├── README.md, PITCH_README.md, selection_rationale.json
+├── dataset/           # curated case JSONs + carriers + mock_credentials
+├── trajectories/      # 30 cases × 2 models = 60 sanitized trajectory JSONs
+├── workspace/         # 20 post-injection workspace snapshots (IPI + Memory)
+├── charts/            # 16 rendered figures (score matrices, disagreement heatmaps, cost, radar) + charts/dark/
+└── generate_charts.py
+```
+
+Sanitization applied: machine paths (`/Users/*`) stripped, live AWS account IDs redacted, real ARNs replaced with mock account `123456789012`. The 5 audit-corrected trajectories retain `original_score` and `score_correction_note` fields so the correction history is fully auditable.
+
+Regenerate charts: `python client_delivery/generate_charts.py --both`
+Verify the delivery: `python -m verifiers client_delivery/trajectories/ --skip-rubrics --quiet`
+
+---
+
+## 23. Citation
 
 If you use this code, benchmark, or findings in your research, please cite:
 
