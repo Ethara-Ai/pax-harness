@@ -63,6 +63,40 @@ MODEL_ALIASES = {
     "claude": "SONNET_4_6",
 }
 
+CC_DIRECT_MODELS = {
+    "cc": "claude-sonnet-4-5",
+    "claude-code": "claude-sonnet-4-5",
+    "cc-sonnet": "claude-sonnet-5",
+    "cc-sonnet-5": "claude-sonnet-5",
+    "cc-sonnet-4-6": "claude-sonnet-4-6",
+    "cc-sonnet-4-5": "claude-sonnet-4-5",
+    "cc-opus": "claude-opus-5",
+    "cc-opus-5": "claude-opus-5",
+    "cc-opus-4-8": "claude-opus-4-8",
+    "cc-opus-4-7": "claude-opus-4-7",
+    "cc-opus-4-6": "claude-opus-4-6",
+    "cc-haiku": "claude-haiku-4-5",
+    "cc-haiku-4-5": "claude-haiku-4-5",
+    "cc-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+    "cc-fable": "claude-fable-5",
+    "cc-fable-5": "claude-fable-5",
+    "cc-mythos": "claude-mythos-5",
+    "cc-mythos-5": "claude-mythos-5",
+    "cc-mythos-preview": "claude-mythos-preview",
+}
+
+CODEX_DIRECT_MODELS = {
+    "ccx": "gpt-5.4",
+    "codex": "gpt-5.4",
+    "ccx-gpt-5": "gpt-5",
+    "ccx-gpt-5-4": "gpt-5.4",
+    "ccx-gpt-5-5": "gpt-5.5",
+    "ccx-o3": "o3",
+    "ccx-o4-mini": "o4-mini",
+    "ccx-o4-mini-high": "o4-mini-high",
+    "ccx-codex": "codex-mini-latest",
+}
+
 # Per-token pricing (USD) — verified against official pricing pages
 # Key = resolved ARN string from .env
 MODEL_PRICING = {
@@ -82,7 +116,9 @@ class HardBenchmarkRunner:
         # Resolve model via MODEL_ALIASES or use raw string
         self.model = self._resolve_model(model or "glm")
 
-        if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+        if (not self._is_claude_code_model(self.model)
+                and not self._is_openai_codex_model(self.model)
+                and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK")):
             logger.error("AWS_BEARER_TOKEN_BEDROCK environment variable not set!")
             sys.exit(1)
         os.environ.setdefault("AWS_REGION_NAME", "us-east-1")
@@ -101,23 +137,46 @@ class HardBenchmarkRunner:
         # If not specified, uses the same model being tested
         self.judge_model = self._resolve_model(judge_model) if judge_model else self.model
         if self.judge_model != self.model:
-            self._register_pricing_for(self.judge_model, label="Judge")
+            if self._is_claude_code_model(self.judge_model):
+                logger.info(f"Judge model: {self.judge_model} via Claude Code subscription (flat-rate)")
+            elif self._is_openai_codex_model(self.judge_model):
+                logger.info(f"Judge model: {self.judge_model} via Codex subscription (flat-rate)")
+            else:
+                self._register_pricing_for(self.judge_model, label="Judge")
 
     @staticmethod
     def _resolve_model(name: str) -> str:
-        """Resolve a short model name (e.g. 'glm', 'nova', 'sonnet') to full ARN from .env."""
-        alias_key = MODEL_ALIASES.get(name.lower())
+        """Resolve a short name via CC_DIRECT_MODELS, CODEX_DIRECT_MODELS, MODEL_ALIASES env vars, else passthrough."""
+        key = name.lower()
+        if key in CC_DIRECT_MODELS:
+            return CC_DIRECT_MODELS[key]
+        if key in CODEX_DIRECT_MODELS:
+            return CODEX_DIRECT_MODELS[key]
+        alias_key = MODEL_ALIASES.get(key)
         if alias_key:
             arn = os.getenv(alias_key)
             if not arn:
                 logger.error(f"Model alias '{name}' maps to env var '{alias_key}' which is not set in .env")
                 sys.exit(1)
             return arn
-        # Not an alias — treat as raw ARN/model string
         return name
+
+    @staticmethod
+    def _is_claude_code_model(model: str) -> bool:
+        return model.startswith("claude-")
+
+    @staticmethod
+    def _is_openai_codex_model(model: str) -> bool:
+        return model.startswith(("gpt-", "o1", "o3", "o4", "codex-"))
 
     def _register_model_pricing(self) -> None:
         """Register test model with litellm for auto cost calculation."""
+        if self._is_claude_code_model(self.model):
+            logger.info(f"Test model: {self.model} via Claude Code subscription (flat-rate; per-token cost tracked as $0)")
+            return
+        if self._is_openai_codex_model(self.model):
+            logger.info(f"Test model: {self.model} via Codex subscription (flat-rate; per-token cost tracked as $0)")
+            return
         self._register_pricing_for(self.model, label="Test model")
 
     def _register_pricing_for(self, model_str: str, label: str = "Model") -> None:
@@ -167,6 +226,20 @@ class HardBenchmarkRunner:
         return carrier_content.replace("{INJECTION_POINT}", injection)
 
     def _create_provider(self) -> LiteLLMProvider:
+        if self._is_claude_code_model(self.model):
+            return LiteLLMProvider(
+                api_key=os.getenv("ANTHROPIC_API_KEY", "pax-cc-stub"),
+                api_base=os.getenv("ANTHROPIC_API_BASE", "http://127.0.0.1:8765"),
+                default_model=self.model,
+                provider_name="claude_code",
+            )
+        if self._is_openai_codex_model(self.model):
+            return LiteLLMProvider(
+                api_key=os.getenv("OPENAI_API_KEY", "pax-ccx-stub"),
+                api_base=os.getenv("OPENAI_BASE_URL", "http://127.0.0.1:8788"),
+                default_model=self.model,
+                provider_name="openai_codex",
+            )
         return LiteLLMProvider(
             api_key=os.environ["AWS_BEARER_TOKEN_BEDROCK"],
             api_base=None,
@@ -745,7 +818,7 @@ async def main():
     parser = argparse.ArgumentParser(description="PASB Hard Adversarial Benchmark")
     parser.add_argument("--concurrency", "-c", type=int, default=DEFAULT_CONCURRENCY,
                         help=f"Number of parallel test cases (default: {DEFAULT_CONCURRENCY})")
-    aliases = ', '.join(f"'{k}'" for k in MODEL_ALIASES.keys())
+    aliases = ', '.join(f"'{k}'" for k in list(MODEL_ALIASES.keys()) + list(CC_DIRECT_MODELS.keys()) + list(CODEX_DIRECT_MODELS.keys()))
     parser.add_argument("--model", "-m", type=str, default=None,
                         help=f"Model alias or full ARN. Aliases: {aliases} (default: glm)")
     parser.add_argument("--output-dir", "-o", type=str, default=None,

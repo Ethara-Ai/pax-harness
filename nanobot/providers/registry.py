@@ -262,6 +262,52 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
+    # Claude Code subscription bridge (nanobot/bridges/claude_code).
+    # Runs a local Anthropic-compatible proxy at 127.0.0.1:8765 that
+    # forwards requests upstream using the user's Claude Code OAuth token
+    # instead of an API key. Selected via provider_name="claude_code".
+    ProviderSpec(
+        name="claude_code",
+        keywords=("claude-code", "cc-",),
+        env_key="ANTHROPIC_API_KEY",        # bridge accepts any non-empty token
+        display_name="Claude Code Subscription",
+        litellm_prefix="anthropic",         # bridge speaks Anthropic protocol → anthropic/claude-*
+        skip_prefixes=("anthropic/",),
+        env_extras=(
+            ("ANTHROPIC_API_BASE", "{api_base}"),
+        ),
+        is_gateway=False,
+        is_local=True,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="http://127.0.0.1:8765",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
+
+    # OpenAI Codex / ChatGPT subscription bridge (nanobot/bridges/openai_codex).
+    # Runs a local OpenAI-compatible proxy at 127.0.0.1:8788 that forwards
+    # requests upstream using the user's ChatGPT/Codex OAuth token instead of
+    # an API key. Selected via provider_name="openai_codex".
+    ProviderSpec(
+        name="openai_codex",
+        keywords=("openai-codex", "ccx-",),
+        env_key="OPENAI_API_KEY",           # bridge accepts any non-empty token
+        display_name="Codex Subscription",
+        litellm_prefix="openai",            # bridge speaks OpenAI protocol → openai/gpt-*
+        skip_prefixes=("openai/",),
+        env_extras=(
+            ("OPENAI_BASE_URL", "{api_base}"),
+        ),
+        is_gateway=False,
+        is_local=True,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="http://127.0.0.1:8788",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
+
     # === Auxiliary (not a primary LLM provider) ============================
 
     # Groq: mainly used for Whisper voice transcription, also usable for LLM.
