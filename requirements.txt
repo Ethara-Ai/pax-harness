@@ -1,6 +1,7 @@
 litellm>=1.55
 python-dotenv>=1.0
 loguru>=0.7
+pydantic-settings>=2.0   # nanobot config layer (BaseSettings) — required to construct the agent
 
 # Claude Code + Codex bridges (nanobot/bridges/*)
 fastapi>=0.110

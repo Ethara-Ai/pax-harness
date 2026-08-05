@@ -6,3 +6,21 @@ __pycache__
 
 # Enviorment variable
 .env
+
+# Run logs
+harbor_*.log
+*_progress.log
+
+# Stale / probe runs (superseded by harbor_cal_jobs/)
+harbor_jobs/
+harbor_probe_jobs/
+harbor_probe/
+hard_probe/
+pax_cases_probe.json
+
+# Generated data artifacts (dataset + Harbor tasks + trajectories) — code only, not data
+pax_cases.json
+hard_dataset/
+harbor_pax/
+harbor_cal_jobs/
+cal_report.json

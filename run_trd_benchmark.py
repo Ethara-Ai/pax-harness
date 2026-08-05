@@ -56,6 +56,40 @@ MODEL_ALIASES = {
     "claude": "SONNET_4_6",
 }
 
+CC_DIRECT_MODELS = {
+    "cc": "claude-sonnet-4-5",
+    "claude-code": "claude-sonnet-4-5",
+    "cc-sonnet": "claude-sonnet-5",
+    "cc-sonnet-5": "claude-sonnet-5",
+    "cc-sonnet-4-6": "claude-sonnet-4-6",
+    "cc-sonnet-4-5": "claude-sonnet-4-5",
+    "cc-opus": "claude-opus-5",
+    "cc-opus-5": "claude-opus-5",
+    "cc-opus-4-8": "claude-opus-4-8",
+    "cc-opus-4-7": "claude-opus-4-7",
+    "cc-opus-4-6": "claude-opus-4-6",
+    "cc-haiku": "claude-haiku-4-5",
+    "cc-haiku-4-5": "claude-haiku-4-5",
+    "cc-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+    "cc-fable": "claude-fable-5",
+    "cc-fable-5": "claude-fable-5",
+    "cc-mythos": "claude-mythos-5",
+    "cc-mythos-5": "claude-mythos-5",
+    "cc-mythos-preview": "claude-mythos-preview",
+}
+
+CODEX_DIRECT_MODELS = {
+    "ccx": "gpt-5.4",
+    "codex": "gpt-5.4",
+    "ccx-gpt-5": "gpt-5",
+    "ccx-gpt-5-4": "gpt-5.4",
+    "ccx-gpt-5-5": "gpt-5.5",
+    "ccx-o3": "o3",
+    "ccx-o4-mini": "o4-mini",
+    "ccx-o4-mini-high": "o4-mini-high",
+    "ccx-codex": "codex-mini-latest",
+}
+
 MODEL_PRICING = {
     os.getenv("GLM_ARN", ""): {"input_cost_per_token": 0.000001, "output_cost_per_token": 0.0000032},
     os.getenv("NOVA_2_LITE", ""): {"input_cost_per_token": 0.0000003, "output_cost_per_token": 0.0000025},
@@ -74,7 +108,9 @@ class TRDBenchmarkRunner:
 
         self.model = self._resolve_model(model or "glm")
 
-        if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+        if (not self._is_claude_code_model(self.model)
+                and not self._is_openai_codex_model(self.model)
+                and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK")):
             logger.error("AWS_BEARER_TOKEN_BEDROCK environment variable not set!")
             sys.exit(1)
         os.environ.setdefault("AWS_REGION_NAME", "us-east-1")
@@ -88,7 +124,12 @@ class TRDBenchmarkRunner:
 
     @staticmethod
     def _resolve_model(name: str) -> str:
-        alias_key = MODEL_ALIASES.get(name.lower())
+        key = name.lower()
+        if key in CC_DIRECT_MODELS:
+            return CC_DIRECT_MODELS[key]
+        if key in CODEX_DIRECT_MODELS:
+            return CODEX_DIRECT_MODELS[key]
+        alias_key = MODEL_ALIASES.get(key)
         if alias_key:
             arn = os.getenv(alias_key)
             if not arn:
@@ -97,7 +138,21 @@ class TRDBenchmarkRunner:
             return arn
         return name
 
+    @staticmethod
+    def _is_claude_code_model(model: str) -> bool:
+        return model.startswith("claude-")
+
+    @staticmethod
+    def _is_openai_codex_model(model: str) -> bool:
+        return model.startswith(("gpt-", "o1", "o3", "o4", "codex-"))
+
     def _register_model_pricing(self) -> None:
+        if self._is_claude_code_model(self.model):
+            logger.info(f"Test model: {self.model} via Claude Code subscription (flat-rate; per-token cost tracked as $0)")
+            return
+        if self._is_openai_codex_model(self.model):
+            logger.info(f"Test model: {self.model} via Codex subscription (flat-rate; per-token cost tracked as $0)")
+            return
         self._register_pricing_for(self.model, label="Test model")
 
     def _register_pricing_for(self, model_str: str, label: str = "Model") -> None:
@@ -128,6 +183,20 @@ class TRDBenchmarkRunner:
         return cases
 
     def _create_provider(self) -> LiteLLMProvider:
+        if self._is_claude_code_model(self.model):
+            return LiteLLMProvider(
+                api_key=os.getenv("ANTHROPIC_API_KEY", "pax-cc-stub"),
+                api_base=os.getenv("ANTHROPIC_API_BASE", "http://127.0.0.1:8765"),
+                default_model=self.model,
+                provider_name="claude_code",
+            )
+        if self._is_openai_codex_model(self.model):
+            return LiteLLMProvider(
+                api_key=os.getenv("OPENAI_API_KEY", "pax-ccx-stub"),
+                api_base=os.getenv("OPENAI_BASE_URL", "http://127.0.0.1:8788"),
+                default_model=self.model,
+                provider_name="openai_codex",
+            )
         return LiteLLMProvider(
             api_key=os.environ["AWS_BEARER_TOKEN_BEDROCK"],
             api_base=None,
