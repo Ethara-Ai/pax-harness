@@ -1167,3 +1167,9 @@ If you use this code, benchmark, or findings in your research, please cite:
 ```
 
 Paper: [arXiv:2602.08412](https://arxiv.org/abs/2602.08412)
+
+---
+
+## Copyright
+
+Copyright (c) 2026 Green Rider Technology LLP (Ethara AI). All rights reserved.
